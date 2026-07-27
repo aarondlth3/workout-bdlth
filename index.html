@@ -54,10 +54,22 @@
         function parseMediaLink(url, isVideoYoutube = false) {
             if (!url) return '';
             
-            // Si le indicamos que es un video de YouTube, construimos la URL del embed directamente
+            // Si le indicamos que es un video de YouTube, construimos la URL del embed de forma segura
             if (isVideoYoutube) {
-                // Asumimos que "url" es el ID del video (ej. AlHVk1uCIQU)
-                return `https://www.youtube-nocookie.com/embed/${url}?autoplay=1&rel=0&modestbranding=1`;
+                let cleanId = String(url).trim();
+                
+                // Si por accidente se pegó el link completo en Google Sheets, extraemos solo el ID
+                if (cleanId.includes('youtu.be/')) {
+                    cleanId = cleanId.split('youtu.be/')[1].split('?')[0];
+                } else if (cleanId.includes('youtube.com/watch')) {
+                    const urlParams = new URLSearchParams(cleanId.split('?')[1]);
+                    cleanId = urlParams.get('v');
+                } else if (cleanId.includes('youtube.com/embed/')) {
+                    cleanId = cleanId.split('youtube.com/embed/')[1].split('?')[0];
+                }
+
+                // Usamos el embed estándar de youtube
+                return `https://www.youtube.com/embed/${cleanId}?autoplay=1&rel=0&playsinline=1`;
             }
             
             // GitHub Blob a Raw (Para reproducir los MP4 e imágenes directo)
@@ -77,6 +89,15 @@
                 }
             }
             return tips;
+        }
+
+        // Función para ocultar el cargador de MP4 (Ahora de forma global y segura)
+        function videoLoaded(videoEl) {
+            const loader = videoEl.previousElementSibling;
+            if(loader && loader.classList.contains('video-loader')) {
+                loader.style.display = 'none';
+            }
+            videoEl.classList.remove('opacity-0');
         }
 
         // ==========================================
@@ -291,28 +312,26 @@
             html += `<div class="p-4">`;
             
             if (isVideoFinalInicio) {
-                // Es Youtube
+                // Recuperamos el ID para el botón de emergencia por si el creador bloqueó el embed
+                let ytId = String(item.Media_1).trim();
+                if (ytId.includes('youtu.be/')) ytId = ytId.split('youtu.be/')[1].split('?')[0];
+                else if (ytId.includes('youtube.com/watch')) ytId = new URLSearchParams(ytId.split('?')[1]).get('v');
+                else if (ytId.includes('youtube.com/embed/')) ytId = ytId.split('youtube.com/embed/')[1].split('?')[0];
+
                 html += `
-                    <div class="w-full aspect-video border-[3px] border-black rounded-lg overflow-hidden mb-6 bg-black shadow-[4px_4px_0px_rgba(0,0,0,1)]">
-                        <iframe class="w-full h-full" src="${media1}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+                    <div class="w-full aspect-video border-[3px] border-black rounded-lg overflow-hidden mb-2 bg-black shadow-[4px_4px_0px_rgba(0,0,0,1)] relative">
+                        <!-- Pequeño loader de fondo mientras carga el Iframe -->
+                        <div class="absolute inset-0 flex items-center justify-center -z-10">
+                            <div class="animate-spin rounded-full h-8 w-8 border-t-4 border-sky-500"></div>
+                        </div>
+                        <iframe class="w-full h-full z-10 relative" src="${media1}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
                     </div>
+                    <a href="https://www.youtube.com/watch?v=${ytId}" target="_blank" class="block text-center text-sm text-sky-600 font-bold mb-6 underline">¿El video tiene error? Ábrelo en YouTube</a>
                     <h2 class="text-center font-black text-2xl my-4 text-gray-800">${item.Titulo || 'Calentamiento / Enfriamiento'}</h2>
                 `;
             } else {
                 // Es Ejercicio con MP4s en Carrusel
-                // Añadimos una pequeña función en línea para manejar la carga de cada video
                 html += `
-                    <script>
-                        function videoLoaded(videoEl) {
-                            // Encuentra el contenedor de carga anterior al video y lo oculta
-                            const loader = videoEl.previousElementSibling;
-                            if(loader && loader.classList.contains('video-loader')) {
-                                loader.style.display = 'none';
-                            }
-                            // Muestra el video suavemente
-                            videoEl.classList.remove('opacity-0');
-                        }
-                    <\/script>
                     <div class="relative w-full aspect-square border-[3px] border-black rounded-lg overflow-hidden mb-4 bg-gray-100 shadow-[4px_4px_0px_rgba(0,0,0,1)]">
                         <div class="flex w-full h-full overflow-x-auto snap-x-mandatory hide-scrollbar">
                 `;
