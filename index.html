@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Rutina de Ejercicios</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Estilos personalizados para el carrusel y barra de scroll */
+        .snap-x-mandatory { scroll-snap-type: x mandatory; }
+        .snap-center { scroll-snap-align: center; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        /* Animación suave para renderizar pantallas */
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-200 text-gray-800 font-sans min-h-screen flex justify-center">
+
+    <!-- Contenedor Principal (Simula la pantalla de celular) -->
+    <div id="app" class="w-full max-w-md bg-white min-h-screen shadow-2xl relative overflow-x-hidden flex flex-col">
+        <!-- El contenido dinámico se inyectará aquí -->
+    </div>
+
+    <script>
+        // ==========================================
+        // CONFIGURACIÓN Y ESTADO GLOBAL
+        // ==========================================
+        
+        // URL de tu Apps Script
+        const API_URL = 'https://script.google.com/macros/s/AKfycbyHKiFqEv8N8yth3ymxcD8ViJL8mkl4_CuCpaHZ6nJUuDNPqwTmRShZddFqFa5k6aUGGA/exec';
+        const USER_ID = 1; // Fijo para el usuario único actual
+
+        let appState = {
+            rutinas: [],
+            diaSeleccionado: null,
+            pasoActual: 1,
+            maxPasos: 0,
+            cargando: true
+        };
+
+        const appContainer = document.getElementById('app');
+
+        // ==========================================
+        // FUNCIONES DE UTILIDAD
+        // ==========================================
+        
+        // Transforma enlaces de YouTube a Embeds y Github blob a Raw
+        function parseMediaLink(url, isVideoYoutube = false) {
+            if (!url) return '';
+            
+            // Si le indicamos que es un video de YouTube, construimos la URL del embed directamente
+            if (isVideoYoutube) {
+                // Asumimos que "url" es el ID del video (ej. AlHVk1uCIQU)
+                return `https://www.youtube-nocookie.com/embed/${url}?autoplay=1&rel=0&modestbranding=1`;
+            }
+            
+            // GitHub Blob a Raw (Para reproducir los MP4 e imágenes directo)
+            if (url.includes('github.com') && url.includes('/blob/')) {
+                return url.replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/');
+            }
+            
+            return url;
+        }
+
+        // Obtener tips dinámicos de un objeto fila
+        function getTips(item) {
+            let tips = [];
+            for (let key in item) {
+                if (key.startsWith('Tip_') && item[key] && String(item[key]).trim() !== '') {
+                    tips.push(item[key]);
+                }
+            }
+            return tips;
+        }
+
+        // ==========================================
+        // CONEXIÓN CON APPS SCRIPT
+        // ==========================================
+        
+        async function initApp() {
+            renderLoading('Conectando con la base de datos...');
+            try {
+                // Configuramos fetch para seguir redirecciones, común en Google Apps Script
+                const fetchOptions = {
+                    redirect: 'follow',
+                    method: 'GET',
+                };
+
+                // Hacemos ambas peticiones simultáneamente
+                const [rutinasRes, progresoRes] = await Promise.all([
+                    fetch(`${API_URL}?action=getRutina`, fetchOptions),
+                    fetch(`${API_URL}?action=getProgreso&userId=${USER_ID}`, fetchOptions)
+                ]);
+
+                if (!rutinasRes.ok || !progresoRes.ok) {
+                   throw new Error(`Respuesta de red fallida. Rutinas: ${rutinasRes.status}, Progreso: ${progresoRes.status}`);
+                }
+
+                // Leeremos como texto primero para poder ver el error si Google nos devuelve HTML en vez de JSON
+                const rutinasText = await rutinasRes.text();
+                const progresoText = await progresoRes.text();
+
+                let rutinasData, progresoData;
+                try {
+                    rutinasData = JSON.parse(rutinasText);
+                    progresoData = JSON.parse(progresoText);
+                } catch (e) {
+                    throw new Error("Respuesta no es JSON. Verifica que publicaste como 'Cualquier Persona'. Recibido: " + rutinasText.substring(0, 150));
+                }
+
+                if (rutinasData.status === 'success') {
+                    appState.rutinas = rutinasData.data;
+                } else {
+                    throw new Error("Error interno Apps Script (Rutinas): " + rutinasData.message);
+                }
+
+                if (progresoData.status === 'success') {
+                    appState.diaSeleccionado = progresoData.data.Dia_Seleccionado;
+                    appState.pasoActual = progresoData.data.Paso_Actual;
+                } else {
+                    throw new Error("Error interno Apps Script (Progreso): " + progresoData.message);
+                }
+
+                if(appState.rutinas.length === 0) {
+                     throw new Error('No se cargaron rutinas. El archivo de sheets parece estar vacío.');
+                }
+
+                appState.cargando = false;
+                renderHome();
+
+            } catch (error) {
+                console.error("Error al iniciar:", error);
+                renderError("Fallo de conexión.", error.message || error.toString());
+            }
+        }
+
+        function saveProgress(dia, paso) {
+            // Guardado en segundo plano (Fire and forget)
+            fetch(API_URL, {
+                method: "POST",
+                redirect: "follow",
+                headers: { 
+                    "Content-Type": "text/plain;charset=utf-8" 
+                },
+                body: JSON.stringify({
+                    action: "saveProgreso",
+                    userId: USER_ID,
+                    dia: dia,
+                    paso: paso
+                })
+            }).catch(err => console.error("Error guardando progreso:", err));
+        }
+
+        // ==========================================
+        // CONTROLADORES DE NAVEGACIÓN
+        // ==========================================
+        
+        function selectDay(dia) {
+            appState.diaSeleccionado = dia;
+            // Calcular max pasos para el día (asumiendo 9 como en tu base, pero dinámico por si acaso)
+            const rutinasDelDia = appState.rutinas.filter(r => r.Dia == dia);
+            appState.maxPasos = Math.max(...rutinasDelDia.map(r => r.Paso));
+            
+            // Si el paso actual excede los pasos del día o es incorrecto, lo reiniciamos a 1
+            if (appState.pasoActual > appState.maxPasos || appState.pasoActual < 1) {
+                appState.pasoActual = 1;
+            }
+            
+            saveProgress(appState.diaSeleccionado, appState.pasoActual);
+            renderStep();
+        }
+
+        function goNext() {
+            if (appState.pasoActual < appState.maxPasos) {
+                appState.pasoActual++;
+                saveProgress(appState.diaSeleccionado, appState.pasoActual);
+                renderStep();
+            } else {
+                // Terminó la rutina
+                appState.pasoActual = appState.maxPasos + 1; // Estado terminado en frontend
+                saveProgress(appState.diaSeleccionado, 1); // Resetear a 1 en DB para la próxima vez
+                renderFinished();
+            }
+        }
+
+        function goPrev() {
+            if (appState.pasoActual > 1) {
+                appState.pasoActual--;
+                saveProgress(appState.diaSeleccionado, appState.pasoActual);
+                renderStep();
+            } else {
+                renderHome();
+            }
+        }
+
+        function goHome() {
+            appState.pasoActual = 1;
+            renderHome();
+        }
+
+        // ==========================================
+        // RENDERIZADO DE PANTALLAS (VISTAS)
+        // ==========================================
+
+        function renderLoading(msg) {
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center flex-grow h-full text-center p-6 fade-in">
+                    <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-sky-500 mb-4"></div>
+                    <p class="text-gray-500 font-medium">${msg}</p>
+                </div>
+            `;
+        }
+
+        function renderError(msg, detalle = "") {
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center flex-grow p-6 text-center fade-in">
+                    <div class="text-red-500 text-6xl mb-4">⚠️</div>
+                    <p class="text-red-600 font-bold text-lg mb-2">${msg}</p>
+                    ${detalle ? `<div class="w-full bg-gray-100 p-3 rounded text-left text-xs text-red-800 font-mono overflow-auto mb-4 border border-red-200" style="max-height: 150px;">${detalle}</div>` : ''}
+                    <button onclick="initApp()" class="px-6 py-3 bg-sky-500 text-white rounded-lg font-bold">Reintentar</button>
+                </div>
+            `;
+        }
+
+        function renderHome() {
+            let txtDia1 = "Rutina Día 1";
+            let txtDia2 = "Rutina Día 2";
+            
+            // Evaluar si poner etiqueta de "continuar"
+            if (appState.diaSeleccionado == 1 && appState.pasoActual > 1 && appState.pasoActual <= 9) {
+                txtDia1 += " (Continuar)";
+            }
+            if (appState.diaSeleccionado == 2 && appState.pasoActual > 1 && appState.pasoActual <= 9) {
+                txtDia2 += " (Continuar)";
+            }
+
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center flex-grow p-6 space-y-6 fade-in bg-gray-50">
+                    <h1 class="text-3xl font-black mb-4 text-center text-gray-800">¡A Entrenar!</h1>
+                    <p class="text-center text-gray-500 mb-6 font-medium">Selecciona la rutina de hoy para comenzar o continuar donde te quedaste.</p>
+                    
+                    <button onclick="selectDay(1)" class="w-full bg-white border-[3px] border-black hover:bg-gray-100 text-black font-bold py-12 px-4 rounded-xl shadow-[4px_4px_0px_rgba(0,0,0,1)] transition transform active:translate-y-1 active:shadow-none text-xl">
+                        ${txtDia1}
+                    </button>
+                    
+                    <button onclick="selectDay(2)" class="w-full bg-white border-[3px] border-black hover:bg-gray-100 text-black font-bold py-12 px-4 rounded-xl shadow-[4px_4px_0px_rgba(0,0,0,1)] transition transform active:translate-y-1 active:shadow-none text-xl mt-4">
+                        ${txtDia2}
+                    </button>
+                </div>
+            `;
+        }
+
+        function renderStep() {
+            const item = appState.rutinas.find(r => r.Dia == appState.diaSeleccionado && r.Paso == appState.pasoActual);
+            
+            if (!item) {
+                renderError("Error: Paso no encontrado en la base de datos.");
+                return;
+            }
+
+            const isVideoFinalInicio = (item.Tipo === 'Video_Inicio' || item.Tipo === 'Video_Fin');
+            
+            // Pasamos un flag a la función para saber si es un video de YouTube
+            const media1 = parseMediaLink(item.Media_1, isVideoFinalInicio); 
+            const media2 = parseMediaLink(item.Media_2);
+            const media3 = parseMediaLink(item.Media_3); // Anatomía
+            const tips = getTips(item);
+            const progresoPct = Math.round((appState.pasoActual / appState.maxPasos) * 100);
+
+            // 1. HEADER & PROGRESO
+            let html = `
+                <div class="flex-shrink-0 fade-in shadow-md relative z-10">
+                    <div class="bg-sky-400 text-white p-3 flex justify-between items-center text-lg">
+                        <span class="font-bold text-black uppercase tracking-wider text-sm">Progreso</span>
+                        <span class="font-black text-black">${progresoPct}%</span>
+                    </div>
+                    <div class="h-2 w-full bg-gray-200">
+                        <div class="h-full bg-blue-600 transition-all duration-500 ease-out" style="width: ${progresoPct}%"></div>
+                    </div>
+                </div>
+                <div class="flex-grow overflow-y-auto overflow-x-hidden pb-6 fade-in bg-white">
+            `;
+
+            // 2. CONTENIDO MEDIA
+            html += `<div class="p-4">`;
+            
+            if (isVideoFinalInicio) {
+                // Es Youtube
+                html += `
+                    <div class="w-full aspect-video border-[3px] border-black rounded-lg overflow-hidden mb-6 bg-black shadow-[4px_4px_0px_rgba(0,0,0,1)]">
+                        <iframe class="w-full h-full" src="${media1}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+                    </div>
+                    <h2 class="text-center font-black text-2xl my-4 text-gray-800">${item.Titulo || 'Calentamiento / Enfriamiento'}</h2>
+                `;
+            } else {
+                // Es Ejercicio con MP4s en Carrusel
+                // Añadimos una pequeña función en línea para manejar la carga de cada video
+                html += `
+                    <script>
+                        function videoLoaded(videoEl) {
+                            // Encuentra el contenedor de carga anterior al video y lo oculta
+                            const loader = videoEl.previousElementSibling;
+                            if(loader && loader.classList.contains('video-loader')) {
+                                loader.style.display = 'none';
+                            }
+                            // Muestra el video suavemente
+                            videoEl.classList.remove('opacity-0');
+                        }
+                    <\/script>
+                    <div class="relative w-full aspect-square border-[3px] border-black rounded-lg overflow-hidden mb-4 bg-gray-100 shadow-[4px_4px_0px_rgba(0,0,0,1)]">
+                        <div class="flex w-full h-full overflow-x-auto snap-x-mandatory hide-scrollbar">
+                `;
+                
+                if (media1) {
+                    html += `
+                        <div class="snap-center min-w-full flex justify-center items-center h-full relative bg-white">
+                            <!-- Spinner de carga -->
+                            <div class="video-loader absolute inset-0 flex flex-col items-center justify-center bg-gray-100 z-10">
+                                <div class="animate-spin rounded-full h-10 w-10 border-t-4 border-b-4 border-sky-500 mb-2"></div>
+                                <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Cargando...</span>
+                            </div>
+                            <!-- Video oculto inicialmente -->
+                            <video src="${media1}" autoplay loop muted playsinline class="w-full h-full object-cover opacity-0 transition-opacity duration-500" onloadeddata="videoLoaded(this)"></video>
+                            
+                            ${media2 ? '<div class="absolute bottom-3 right-3 bg-black text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg z-20">Desliza 1/2 👉</div>' : ''}
+                        </div>`;
+                }
+                if (media2) {
+                    html += `
+                        <div class="snap-center min-w-full flex justify-center items-center h-full relative bg-white">
+                            <!-- Spinner de carga -->
+                            <div class="video-loader absolute inset-0 flex flex-col items-center justify-center bg-gray-100 z-10">
+                                <div class="animate-spin rounded-full h-10 w-10 border-t-4 border-b-4 border-sky-500 mb-2"></div>
+                                <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Cargando...</span>
+                            </div>
+                            <!-- Video oculto inicialmente -->
+                            <video src="${media2}" autoplay loop muted playsinline class="w-full h-full object-cover opacity-0 transition-opacity duration-500" onloadeddata="videoLoaded(this)"></video>
+                            
+                            <div class="absolute bottom-3 left-3 bg-black text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg z-20">👈 2/2</div>
+                        </div>`;
+                }
+                
+                html += `
+                        </div>
+                    </div>
+                    
+                    <div class="text-center my-6">
+                        <h2 class="font-black text-2xl text-gray-800 leading-tight">${item.Titulo}</h2>
+                        ${item.Series ? `<div class="inline-block mt-3 bg-gray-100 border-2 border-gray-300 rounded-lg px-4 py-2 font-bold text-gray-700">${item.Series} series <span class="mx-2 text-gray-400">|</span> ${item.Repeticiones} reps</div>` : ''}
+                    </div>
+                `;
+            }
+            
+            // 3. CONTROLES BOTONES
+            html += `
+                <div class="flex justify-center gap-5 my-8">
+                    <button onclick="goPrev()" class="w-16 h-14 bg-white border-2 border-black hover:bg-gray-100 text-black font-black text-2xl rounded-xl flex items-center justify-center transition active:translate-y-1 active:shadow-none shadow-[3px_3px_0px_rgba(0,0,0,1)]"> < </button>
+            `;
+            
+            if (item.Link_Externo) {
+                html += `<a href="${item.Link_Externo}" target="_blank" class="w-16 h-14 bg-white border-2 border-black hover:bg-gray-100 text-black font-black text-2xl rounded-xl flex items-center justify-center transition active:translate-y-1 active:shadow-none shadow-[3px_3px_0px_rgba(0,0,0,1)]"> ? </a>`;
+            } else {
+                html += `<div class="w-16 h-14 bg-gray-100 border-2 border-gray-300 text-gray-400 font-black text-2xl rounded-xl flex items-center justify-center"> ? </div>`;
+            }
+
+            html += `
+                    <button onclick="goNext()" class="w-16 h-14 bg-sky-400 border-2 border-black hover:bg-sky-500 text-black font-black text-2xl rounded-xl flex items-center justify-center transition active:translate-y-1 active:shadow-none shadow-[3px_3px_0px_rgba(0,0,0,1)]"> > </button>
+                </div>
+            `;
+            html += `</div>`; // Fin del contenedor p-4
+
+            // 4. INFORMACIÓN (TIPS Y ANATOMÍA)
+            if (tips.length > 0 || media3) {
+                html += `
+                <div class="px-6 mt-2 mb-10">
+                    <div class="relative flex py-5 items-center">
+                        <div class="flex-grow border-t-2 border-black"></div>
+                        <span class="flex-shrink-0 mx-4 text-black font-black uppercase tracking-widest text-sm">Información</span>
+                        <div class="flex-grow border-t-2 border-black"></div>
+                    </div>
+                `;
+                
+                // Tips
+                if (tips.length > 0) {
+                    html += `<div class="space-y-6 mt-4">`;
+                    tips.forEach((tip, index) => {
+                        html += `
+                            <div class="flex items-start gap-4">
+                                <div class="w-8 h-8 rounded-full bg-black text-white flex-shrink-0 flex items-center justify-center font-bold shadow-md mt-0.5">
+                                    ${index + 1}
+                                </div>
+                                <p class="text-base font-medium leading-relaxed text-gray-700">${tip}</p>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+
+                // Anatomía (Media 3)
+                if (media3) {
+                    html += `
+                    <div class="mt-10 border-[3px] border-dashed border-gray-300 rounded-xl p-6 flex flex-col items-center bg-gray-50">
+                        <h4 class="text-sm text-gray-500 font-black uppercase mb-4 tracking-wider">Músculos implicados</h4>
+                        <img src="${media3}" alt="Anatomía del ejercicio" class="w-4/5 max-w-[250px] object-contain drop-shadow-xl mix-blend-multiply">
+                    </div>
+                    `;
+                }
+
+                html += `</div>`;
+            }
+
+            html += `</div>`; // Cierra flex-grow
+
+            appContainer.innerHTML = html;
+        }
+
+        function renderFinished() {
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center flex-grow p-6 text-center fade-in bg-green-400">
+                    <h1 class="text-4xl font-black mb-3 text-black">¡Completado!</h1>
+                    <p class="text-green-900 font-bold mb-10 text-lg">Excelente trabajo hoy. Has terminado todos los ejercicios de tu rutina.</p>
+                    
+                    <div class="text-[140px] mb-12 animate-bounce drop-shadow-2xl">
+                        🏆
+                    </div>
+                    
+                    <button onclick="goHome()" class="w-24 h-24 bg-white border-[4px] border-black hover:bg-gray-100 text-black font-black text-5xl rounded-2xl flex items-center justify-center transition active:translate-y-2 active:shadow-none shadow-[6px_6px_0px_rgba(0,0,0,1)]">
+                        ↩
+                    </button>
+                    <p class="mt-6 font-black text-black text-sm uppercase tracking-widest">Volver al inicio</p>
+                </div>
+            `;
+        }
+
+        // ==========================================
+        // ARRANQUE DE LA APP
+        // ==========================================
+        window.onload = initApp;
+
+    </script>
+</body>
+</html>
